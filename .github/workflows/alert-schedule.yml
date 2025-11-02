@@ -1,0 +1,29 @@
+name: Strategy Signal Alerts
+
+on:
+  schedule:
+    - cron: '0 21 * * 1-5'  # 4:00 PM ET / 5:00 PM ET (9:00 PM UTC) on weekdays (market close)
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  check-signals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          pip install vectorbt yfinance pandas numpy requests
+          pip install TA-Lib-binary || pip install TA-Lib
+      
+      - name: Run alert service
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python alerts/alert_service.py
+
