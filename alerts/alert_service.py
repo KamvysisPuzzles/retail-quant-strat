@@ -116,6 +116,7 @@ def main():
         previous_state = load_state()
         current_state, signals = get_current_signals()
         
+        # Identify which signals have flipped
         changed_signals = []
         for sig in signals:
             leg_id = sig['leg_id']
@@ -125,19 +126,42 @@ def main():
             if prev_pos != curr_pos and prev_pos != -1:
                 changed_signals.append(sig)
         
-        if changed_signals:
-            message = "🚨 Signal Alert\n\n"
+        # Always send a message - use different header if signals flipped
+        has_changes = len(changed_signals) > 0
+        
+        if has_changes:
+            # Signal flipped - use alert header
+            message = "🚨 Signal Alert - Signals Changed\n\n"
+            message += "Changed Signals:\n"
             for sig in changed_signals:
+                prev_pos = previous_state.get(sig['leg_id'], -1)
+                prev_signal = "BUY" if prev_pos == 1 else "SELL"
+                message += f"{sig['symbol']} ({sig['strategy']}): {prev_signal} → {sig['signal']}\n"
+                message += f"Price: ${sig['price']:.2f}\n\n"
+            
+            if len(changed_signals) < len(signals):
+                message += "All Current Signals:\n"
+                for sig in signals:
+                    message += f"{sig['symbol']} ({sig['strategy']}): {sig['signal']}\n"
+                    message += f"Price: ${sig['price']:.2f}\n\n"
+        else:
+            # No changes - daily status update
+            message = "📊 Daily Signal Update\n\n"
+            message += "Current Positions:\n\n"
+            for sig in signals:
                 message += f"{sig['symbol']} ({sig['strategy']}): {sig['signal']}\n"
                 message += f"Price: ${sig['price']:.2f}\n\n"
-            message += f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M %Z')}"
-            
-            if send_telegram(message):
-                save_state(current_state)
-            else:
-                print("Failed to send Telegram alert")
-        else:
+        
+        message += f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M %Z')}"
+        
+        if send_telegram(message):
             save_state(current_state)
+            if has_changes:
+                print(f"Successfully sent alert with {len(changed_signals)} changed signal(s)")
+            else:
+                print(f"Successfully sent daily update with {len(signals)} signal(s)")
+        else:
+            print("Failed to send Telegram alert")
             
     except Exception as e:
         print(f"Error: {e}")
