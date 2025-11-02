@@ -69,6 +69,14 @@ def send_telegram(message):
         print("Error: TELEGRAM_CHAT_ID environment variable is not set")
         return False
     
+    # Clean up token (remove any whitespace that might have been accidentally added)
+    token = token.strip()
+    
+    # Validate token format (Telegram bot tokens have format: numbers:letters_with_underscores)
+    if ':' not in token or not token.split(':', 1)[0].isdigit():
+        print("Warning: TELEGRAM_BOT_TOKEN format appears invalid. Expected format: '123456789:ABCdef...'")
+        print(f"Token starts with: {token[:10]}... (first 10 chars)")
+    
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     data = {"chat_id": chat_id, "text": message}
     
@@ -92,7 +100,9 @@ def send_telegram(message):
         return False
 
 def get_current_signals():
-    start_date = (datetime.now() - timedelta(days=250)).strftime('%Y-%m-%d')
+    # Use enough history for indicator warm-up (max period is EMA 125 = ~125 days)
+    # Adding buffer for safety - use ~200 days to ensure stable indicators
+    start_date = (datetime.now() - timedelta(days=200)).strftime('%Y-%m-%d')
     
     combiner = StrategyCombiner(
         strategies=STRATEGIES_CONFIG,
@@ -114,8 +124,15 @@ def get_current_signals():
     
     for leg_id, leg in legs.items():
         exposure = leg.exposure
-        current_position = int(exposure.iloc[-1]) if len(exposure) > 0 else 0
+        if len(exposure) == 0:
+            print(f"Warning: No exposure data for {leg_id}")
+            continue
+            
+        current_position = int(exposure.iloc[-1])
         current_state[leg_id] = current_position
+        
+        # Get the date of the latest signal for debugging
+        latest_date = exposure.index[-1] if hasattr(exposure.index[-1], 'strftime') else str(exposure.index[-1])
         
         signal_type = "BUY" if current_position == 1 else "SELL"
         signals.append({
@@ -124,8 +141,12 @@ def get_current_signals():
             'strategy': leg.strategy_name,
             'position': current_position,
             'signal': signal_type,
-            'price': float(leg.close.iloc[-1]) if len(leg.close) > 0 else 0.0
+            'price': float(leg.close.iloc[-1]) if len(leg.close) > 0 else 0.0,
+            'date': latest_date
         })
+        
+        # Debug output
+        print(f"{leg_id}: {signal_type} signal (position={current_position}) on {latest_date}")
     
     return current_state, signals
 
@@ -154,21 +175,30 @@ def main():
             for sig in changed_signals:
                 prev_pos = previous_state.get(sig['leg_id'], -1)
                 prev_signal = "BUY" if prev_pos == 1 else "SELL"
+                date_str = sig.get('date', 'N/A')
+                if hasattr(date_str, 'strftime'):
+                    date_str = date_str.strftime('%Y-%m-%d')
                 message += f"{sig['symbol']} ({sig['strategy']}): {prev_signal} → {sig['signal']}\n"
-                message += f"Price: ${sig['price']:.2f}\n\n"
+                message += f"Price: ${sig['price']:.2f} (as of {date_str})\n\n"
             
             if len(changed_signals) < len(signals):
                 message += "All Current Signals:\n"
                 for sig in signals:
+                    date_str = sig.get('date', 'N/A')
+                    if hasattr(date_str, 'strftime'):
+                        date_str = date_str.strftime('%Y-%m-%d')
                     message += f"{sig['symbol']} ({sig['strategy']}): {sig['signal']}\n"
-                    message += f"Price: ${sig['price']:.2f}\n\n"
+                    message += f"Price: ${sig['price']:.2f} (as of {date_str})\n\n"
         else:
             # No changes - daily status update
             message = "📊 Daily Signal Update\n\n"
             message += "Current Positions:\n\n"
             for sig in signals:
+                date_str = sig.get('date', 'N/A')
+                if hasattr(date_str, 'strftime'):
+                    date_str = date_str.strftime('%Y-%m-%d')
                 message += f"{sig['symbol']} ({sig['strategy']}): {sig['signal']}\n"
-                message += f"Price: ${sig['price']:.2f}\n\n"
+                message += f"Price: ${sig['price']:.2f} (as of {date_str})\n\n"
         
         message += f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M %Z')}"
         
