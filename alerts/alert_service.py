@@ -61,7 +61,12 @@ def send_telegram(message):
     token = os.environ.get('TELEGRAM_BOT_TOKEN')
     chat_id = os.environ.get('TELEGRAM_CHAT_ID')
     
-    if not token or not chat_id:
+    if not token:
+        print("Error: TELEGRAM_BOT_TOKEN environment variable is not set")
+        return False
+    
+    if not chat_id:
+        print("Error: TELEGRAM_CHAT_ID environment variable is not set")
         return False
     
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -69,8 +74,21 @@ def send_telegram(message):
     
     try:
         response = requests.post(url, data=data, timeout=10)
-        return response.status_code == 200
-    except:
+        if response.status_code == 200:
+            return True
+        else:
+            print(f"Error: Telegram API returned status code {response.status_code}")
+            try:
+                error_data = response.json()
+                print(f"Telegram API error: {error_data}")
+            except:
+                print(f"Telegram API response: {response.text}")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"Error sending Telegram message: {e}")
+        return False
+    except Exception as e:
+        print(f"Unexpected error: {e}")
         return False
 
 def get_current_signals():
