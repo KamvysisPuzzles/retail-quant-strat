@@ -104,13 +104,17 @@ def get_current_signals():
     # Adding buffer for safety - use ~200 days to ensure stable indicators
     start_date = (datetime.now() - timedelta(days=200)).strftime('%Y-%m-%d')
     
+    # Use previous day's date as end_date to ensure we only use complete daily candles
+    # This avoids issues with partial/incomplete data for the current day
+    end_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    
     combiner = StrategyCombiner(
         strategies=STRATEGIES_CONFIG,
         initial_capital=100_000.0,
         fees=0.0005,
         slippage=0.0005,
         start_date=start_date,
-        end_date=None,
+        end_date=end_date,
         align_to_symbol='TQQQ',
         rebalance_freq='Q',
         safe_asset='GLD'

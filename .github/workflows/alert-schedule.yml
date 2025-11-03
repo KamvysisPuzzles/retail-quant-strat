@@ -2,7 +2,7 @@ name: Strategy Signal Alerts
 
 on:
   schedule:
-    - cron: '0 21 * * 1-5'  # 4:00 PM ET / 5:00 PM ET (9:00 PM UTC) on weekdays (market close)
+    - cron: '0 8 * * 1-5'  # 9:00 AM BST / 8:00 AM GMT (8:00 AM UTC) on weekdays - uses previous day's prices
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
