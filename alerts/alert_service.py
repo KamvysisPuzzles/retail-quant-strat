@@ -104,9 +104,11 @@ def get_current_signals():
     # Adding buffer for safety - use ~200 days to ensure stable indicators
     start_date = (datetime.now() - timedelta(days=200)).strftime('%Y-%m-%d')
     
-    # Use previous day's date as end_date to ensure we only use complete daily candles
-    # This avoids issues with partial/incomplete data for the current day
-    end_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    # Don't specify end_date - let yfinance fetch the latest available data
+    # This ensures we always get the most recent trading day, avoiding issues with
+    # weekends/holidays where datetime.now() - timedelta(days=1) might be stale
+    # The latest date will be determined by the actual data returned
+    end_date = None
     
     combiner = StrategyCombiner(
         strategies=STRATEGIES_CONFIG,
