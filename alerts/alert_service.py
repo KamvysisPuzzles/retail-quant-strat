@@ -184,7 +184,7 @@ def main():
                 date_str = sig.get('date', 'N/A')
                 if hasattr(date_str, 'strftime'):
                     date_str = date_str.strftime('%Y-%m-%d')
-                message += f"{sig['symbol']} ({sig['strategy']}): {prev_signal} → {sig['signal']}\n"
+                message += f"{sig['symbol']}: {prev_signal} → {sig['signal']}\n"
                 message += f"Price: ${sig['price']:.2f} (as of {date_str})\n\n"
             
             if len(changed_signals) < len(signals):
@@ -193,7 +193,7 @@ def main():
                     date_str = sig.get('date', 'N/A')
                     if hasattr(date_str, 'strftime'):
                         date_str = date_str.strftime('%Y-%m-%d')
-                    message += f"{sig['symbol']} ({sig['strategy']}): {sig['signal']}\n"
+                    message += f"{sig['symbol']}: {sig['signal']}\n"
                     message += f"Price: ${sig['price']:.2f} (as of {date_str})\n\n"
         else:
             # No changes - daily status update
