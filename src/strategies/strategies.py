@@ -733,7 +733,76 @@ def btc_3ema_macdv_aroon(prices: pd.DataFrame, params: Dict) -> pd.Series:
     return (entries_array, exits_array)
 
 
+def simple_3ema(prices: pd.DataFrame, params: Dict) -> Tuple[pd.Series, pd.Series]:
+    """
+    Simple 3EMA strategy using only three exponential moving averages.
+    Entry signals when EMAs cross in bullish patterns.
+    Exit signals when EMAs cross in bearish patterns.
+    
+    Parameters:
+        ema1: Fast EMA period (default: 12)
+        ema2: Medium EMA period (default: 26)
+        ema3: Slow EMA period (default: 50)
+    """
+    close = prices["close"].astype(float)
+    
+    # Extract parameters with defaults
+    ema1 = int(params.get("ema1", 12))
+    ema2 = int(params.get("ema2", 26))
+    ema3 = int(params.get("ema3", 50))
+    
+    # Calculate EMAs using vectorbt if available, otherwise pandas
+    if vbt is not None:
+        ema1_ma = vbt.MA.run(close, ema1, ewm=True).ma
+        ema2_ma = vbt.MA.run(close, ema2, ewm=True).ma
+        ema3_ma = vbt.MA.run(close, ema3, ewm=True).ma
+        
+        # 3EMA Signals using vectorbt's crossover methods
+        entries = (
+            ema1_ma.vbt.crossed_above(ema2_ma) |
+            ema1_ma.vbt.crossed_above(ema3_ma) |
+            ema2_ma.vbt.crossed_above(ema3_ma)
+        )
+        exits = (
+            ema1_ma.vbt.crossed_below(ema2_ma) |
+            ema1_ma.vbt.crossed_below(ema3_ma) |
+            ema2_ma.vbt.crossed_below(ema3_ma)
+        )
+        # Convert vectorbt signals to pandas Series
+        entries = pd.Series(np.asarray(entries).ravel(), index=close.index, dtype=bool)
+        exits = pd.Series(np.asarray(exits).ravel(), index=close.index, dtype=bool)
+    else:
+        # Fallback to pandas if vectorbt not available
+        ema1_ma = close.ewm(span=ema1, adjust=False).mean()
+        ema2_ma = close.ewm(span=ema2, adjust=False).mean()
+        ema3_ma = close.ewm(span=ema3, adjust=False).mean()
+        
+        # 3EMA Signals (crossover-based)
+        entries = (
+            (ema1_ma > ema2_ma) & (ema1_ma.shift(1) <= ema2_ma.shift(1)) |
+            (ema1_ma > ema3_ma) & (ema1_ma.shift(1) <= ema3_ma.shift(1)) |
+            (ema2_ma > ema3_ma) & (ema2_ma.shift(1) <= ema3_ma.shift(1))
+        )
+        exits = (
+            (ema1_ma < ema2_ma) & (ema1_ma.shift(1) >= ema2_ma.shift(1)) |
+            (ema1_ma < ema3_ma) & (ema1_ma.shift(1) >= ema3_ma.shift(1)) |
+            (ema2_ma < ema3_ma) & (ema2_ma.shift(1) >= ema3_ma.shift(1))
+        )
+    
+    # Ensure signals are properly indexed Series
+    entries = pd.Series(entries.fillna(False), index=close.index, dtype=bool)
+    exits = pd.Series(exits.fillna(False), index=close.index, dtype=bool)
+    
+    # Convert to arrays first (matching original notebook behavior)
+    entries_array = pd.Series(np.asarray(entries).ravel(), index=close.index, dtype=bool)
+    exits_array = pd.Series(np.asarray(exits).ravel(), index=close.index, dtype=bool)
+    
+    # Return entries/exits directly
+    return (entries_array, exits_array)
+
+
 register_strategy("sma_cross", sma_cross)
+register_strategy("3ema", simple_3ema)
 register_strategy("tqqq_3ema_macdv_aroon", tqqq_3ema_macdv_aroon)
 register_strategy("btc_3ema_macdv_aroon", btc_3ema_macdv_aroon)
 register_strategy("3ema_macdv", three_ema_macdv)

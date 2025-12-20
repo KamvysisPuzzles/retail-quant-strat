@@ -2,13 +2,14 @@
 Strategy Combiner - Object-oriented approach for combining multiple strategies.
 """
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 import pandas as pd
 import numpy as np
 from src.backtesting.legs import LegResult, backtest_leg
 from src.strategies.strategies import STRATEGIES
-from src.backtesting.portfolio_combo import CombinedPortfolio, combine_portfolios
+from src.backtesting.portfolio_combo import CombinedPortfolio, combine_portfolios, calculate_rebalance_dates
 from src.backtesting.data_loader import load_data
+from src.backtesting.signal_based_allocation import calculate_signal_based_weights
 
 
 @dataclass
@@ -42,7 +43,8 @@ class StrategyCombiner:
         end_date: Optional[str] = None,
         align_to_symbol: Optional[str] = None,
         rebalance_freq: Optional[str] = None,
-        safe_asset: Optional[str] = None
+        safe_asset: Optional[str] = None,
+        rsi_ranking: Optional[Any] = None  # Deprecated - ignored, kept for backward compatibility
     ):
         """
         Initialize StrategyCombiner.
@@ -65,6 +67,9 @@ class StrategyCombiner:
                 - 'Y' or 'A': Yearly rebalancing
             safe_asset: Optional ticker symbol for safe asset (e.g., 'TLT', 'GLD', 'SHY').
                        When strategies have sell signals, this asset will be held instead of cash.
+            rsi_ranking: DEPRECATED - This parameter is ignored. Signal-based allocation is now used
+                        automatically when rebalance_freq is set. Only strategies with buy signals
+                        receive allocation, with a maximum of 1/3 per strategy.
         """
         self.strategies = strategies
         self.initial_capital = initial_capital
@@ -75,12 +80,16 @@ class StrategyCombiner:
         self.align_to_symbol = align_to_symbol
         self.rebalance_freq = rebalance_freq
         self.safe_asset = safe_asset
+        # rsi_ranking is deprecated but kept for backward compatibility
+        self.rsi_ranking = None  # Always None - signal-based allocation is used instead
         
         # Will be populated during execution
         self.data: Optional[Dict[str, pd.DataFrame]] = None
         self.legs: Optional[Dict[str, LegResult]] = None
         self.combined_portfolio: Optional[CombinedPortfolio] = None
         self.safe_asset_data: Optional[pd.DataFrame] = None
+        self.rsi_weights_df: Optional[pd.DataFrame] = None  # Dynamic weights (signal-based)
+        self.rsi_values_df: Optional[pd.DataFrame] = None  # Not used (kept for compatibility)
         
         # Validate strategy names
         self._validate_strategies()
@@ -222,27 +231,75 @@ class StrategyCombiner:
         
         This creates a CombinedPortfolio object that combines the returns
         from each strategy according to their weights.
+        If rebalancing is enabled (rebalance_freq is not None), signal-based
+        allocation is used: only strategies with buy signals receive allocation,
+        with a maximum of 1/3 per strategy.
         """
         if self.legs is None or len(self.legs) == 0:
             raise ValueError("No legs to combine. Call generate_signals_and_backtest() first")
         
-        # Create weights dictionary
+        # Create weights dictionary (used as fallback if rebalancing is not enabled)
         weights = {s.id: s.weight for s in self.strategies if s.id in self.legs}
         
-        # Normalize weights (in case they don't sum to 1.0)
-        total_weight = sum(weights.values())
-        if total_weight > 0:
-            weights = {k: v / total_weight for k, v in weights.items()}
+        # Check if weights are all equal (indicating they weren't meaningfully set)
+        # If so, default to equal weights
+        if len(weights) > 0:
+            weight_values = list(weights.values())
+            if len(set(weight_values)) == 1:
+                # All weights are the same - use equal weights instead
+                equal_weight = 1.0 / len(weights)
+                weights = {k: equal_weight for k in weights.keys()}
+            else:
+                # Normalize weights (in case they don't sum to 1.0)
+                total_weight = sum(weights.values())
+                if total_weight > 0:
+                    weights = {k: v / total_weight for k, v in weights.items()}
+        
+        # Calculate dynamic weights using signal-based allocation on a DAILY basis
+        # Every trading day:
+        #   - If at least one leg has a buy signal, split allocation equally across those legs
+        #   - If no legs have a buy signal, keep equal allocation across all legs
+        dynamic_weights_df = None
+        rebalance_freq_for_combo = self.rebalance_freq
+
+        # Get common index across all legs (trading days)
+        indices = [leg.returns.index for leg in self.legs.values()]
+        common_index = indices[0]
+        for idx in indices[1:]:
+            common_index = common_index.intersection(idx)
+        
+        if len(common_index) > 0:
+            try:
+                # Use all trading days for signal-based allocation
+                dynamic_weights_df = calculate_signal_based_weights(
+                    legs=self.legs,
+                    dates=common_index
+                )
+                self.rsi_weights_df = dynamic_weights_df
+                # Rebalance daily based on these weights
+                rebalance_freq_for_combo = 'D'
+                print(f"✅ Calculated daily signal-based dynamic weights for {len(common_index)} trading days")
+                print("   - If at least one strategy has a buy signal, capital is split equally across those legs.")
+                print("   - If no strategies have buy signals, capital is split equally across all legs.")
+            except Exception as e:
+                print(f"Warning: Failed to calculate signal-based weights: {e}")
+                print("Falling back to static weights")
+                dynamic_weights_df = None
+                rebalance_freq_for_combo = self.rebalance_freq
         
         # Combine portfolios
         self.combined_portfolio = combine_portfolios(
             legs=self.legs,
             weights=weights,
             initial_capital=self.initial_capital,
-            rebalance_freq=self.rebalance_freq
+            rebalance_freq=rebalance_freq_for_combo,
+            dynamic_weights_df=dynamic_weights_df
         )
         
-        print(f"✅ Combined {len(self.legs)} strategies into portfolio")
+        if dynamic_weights_df is not None:
+            print(f"✅ Combined {len(self.legs)} strategies into portfolio (with signal-based dynamic weights)")
+        else:
+            print(f"✅ Combined {len(self.legs)} strategies into portfolio")
     
     def run(self, start_date: Optional[str] = None, end_date: Optional[str] = None):
         """

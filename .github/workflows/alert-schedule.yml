@@ -18,12 +18,11 @@ jobs:
       
       - name: Install dependencies
         run: |
-          pip install vectorbt yfinance pandas numpy requests
-          pip install TA-Lib-binary || pip install TA-Lib
+          pip install yfinance pandas numpy requests scikit-learn hmmlearn
       
-      - name: Run alert service
+      - name: Run regime alert service
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python alerts/alert_service.py
+        run: python alerts/regime_alert_service.py
 
