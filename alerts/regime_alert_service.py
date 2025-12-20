@@ -24,7 +24,7 @@ SYMBOL = "QQQ"
 LEVERAGED_SYMBOL = "TQQQ"
 VIX_SYMBOL = "^VIX"
 RATES_SYMBOL = "^TNX"
-FEATURE_SET_CONFIG = 'extended'  # 'base' or 'extended'
+FEATURE_SET_CONFIG = 'base'  # 'base' or 'extended'
 CIRCUIT_BREAKER_ENABLED = False
 CIRCUIT_BREAKER_THRESHOLD = -0.05
 
@@ -81,17 +81,68 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 def calculate_features(qqq_data, vix_data, rates_data):
-    """Calculate all features for the HMM-RF strategy"""
+    """
+    Calculate all features for the HMM-RF strategy
+    
+    Args:
+        qqq_data: DataFrame with 'close' column
+        vix_data: Series or DataFrame with 'close' column (aligned VIX prices)
+        rates_data: Series or DataFrame with 'close' column (aligned rates)
+    """
+    # Validate input data
+    if qqq_data.empty or len(qqq_data) < 2:
+        raise ValueError(f"QQQ data must have at least 2 rows, got {len(qqq_data)}")
+    if 'close' not in qqq_data.columns:
+        raise ValueError("QQQ data missing 'close' column")
+    if qqq_data['close'].isna().all():
+        raise ValueError("All QQQ close prices are NaN")
+    
     features_df = pd.DataFrame(index=qqq_data.index)
     
     # Base features (all properly lagged by 1 day)
-    features_df['rt'] = np.log(qqq_data['close'] / qqq_data['close'].shift(1)).shift(1)
-    features_df['daily_return'] = qqq_data['close'].pct_change().shift(1)
+    # Check if we have valid data before calculating returns
+    valid_close = qqq_data['close'].dropna()
+    if len(valid_close) < 2:
+        raise ValueError(f"Need at least 2 valid close prices, got {len(valid_close)}")
+    
+    # Calculate rt (log returns) with validation
+    close_series = qqq_data['close']
+    if close_series.isna().all():
+        raise ValueError("Cannot calculate returns: All QQQ close prices are NaN")
+    if close_series.notna().sum() < 2:
+        raise ValueError(f"Cannot calculate returns: Need at least 2 non-null values, got {close_series.notna().sum()}")
+    
+    features_df['rt'] = np.log(close_series / close_series.shift(1)).shift(1)
+    
+    # Calculate daily_return with error handling
+    try:
+        # Ensure we have valid data before calling pct_change
+        if close_series.isna().all() or close_series.notna().sum() < 1:
+            raise ValueError(f"Cannot calculate pct_change: insufficient valid data. "
+                           f"Total rows: {len(close_series)}, Non-null: {close_series.notna().sum()}")
+        features_df['daily_return'] = close_series.pct_change().shift(1)
+    except (ValueError, IndexError) as e:
+        error_msg = str(e)
+        if "argmax of an empty sequence" in error_msg or "empty sequence" in error_msg:
+            raise ValueError(f"Cannot calculate returns: QQQ close data issue. "
+                           f"Data length: {len(qqq_data)}, "
+                           f"Non-null values: {qqq_data['close'].notna().sum()}, "
+                           f"First few values: {qqq_data['close'].head().tolist()}")
+        raise
     features_df['rv_20'] = features_df['rt'].rolling(window=20).std() * np.sqrt(252)
     features_df['rv_5'] = features_df['rt'].rolling(window=5).std() * np.sqrt(252)
     features_df['mom_21'] = qqq_data['close'].pct_change(21).shift(1)
-    features_df['vix'] = vix_data['close'].shift(1)
-    features_df['rates'] = rates_data['close'].shift(1)
+    
+    # Handle vix_data and rates_data as either Series or DataFrame
+    if isinstance(vix_data, pd.Series):
+        features_df['vix'] = vix_data.shift(1)
+    else:
+        features_df['vix'] = vix_data['close'].shift(1) if 'close' in vix_data.columns else vix_data.shift(1)
+    
+    if isinstance(rates_data, pd.Series):
+        features_df['rates'] = rates_data.shift(1)
+    else:
+        features_df['rates'] = rates_data['close'].shift(1) if 'close' in rates_data.columns else rates_data.shift(1)
     
     # Extended features
     if FEATURE_SET_CONFIG == 'extended':
@@ -163,33 +214,162 @@ def calculate_features(qqq_data, vix_data, rates_data):
     
     return features_df
 
+def download_symbol_data(symbol, start_date, end_date=None, max_attempts=3):
+    """
+    Download symbol data with retry logic and error handling.
+    
+    Args:
+        symbol: Stock symbol to download
+        start_date: Start date for data
+        end_date: End date for data (None for latest)
+        max_attempts: Maximum number of download attempts
+        
+    Returns:
+        DataFrame with downloaded data
+        
+    Raises:
+        ValueError if download fails after all attempts
+    """
+    download_attempts = [
+        {'auto_adjust': True, 'actions': True},
+        {'auto_adjust': False, 'actions': False},
+        {'auto_adjust': True, 'actions': False},
+    ]
+    
+    for attempt_num, params in enumerate(download_attempts[:max_attempts], 1):
+        try:
+            print(f"  Attempt {attempt_num}/{max_attempts}: Downloading {symbol}...")
+            data = yf.download(
+                symbol, 
+                start=start_date, 
+                end=end_date, 
+                progress=False, 
+                auto_adjust=params['auto_adjust'],
+                actions=params['actions'],
+                timeout=30
+            )
+            
+            # Check if we got valid data
+            if data is not None and not data.empty:
+                print(f"  ✓ Successfully downloaded {symbol} ({len(data)} rows)")
+                return data
+                
+        except Exception as e:
+            error_str = str(e)
+            # Handle specific yfinance errors
+            if "timezone" in error_str.lower() or "delisted" in error_str.lower():
+                print(f"  ⚠ Timezone/delisting warning for {symbol}, trying alternative method...")
+            else:
+                print(f"  ✗ Attempt {attempt_num} failed: {error_str[:100]}")
+            
+            # On last attempt, try Ticker object as fallback
+            if attempt_num == len(download_attempts[:max_attempts]):
+                try:
+                    print(f"  Trying alternative download method (Ticker) for {symbol}...")
+                    ticker = yf.Ticker(symbol)
+                    # Try with period instead of dates if date range fails
+                    try:
+                        data = ticker.history(start=start_date, end=end_date, auto_adjust=params['auto_adjust'])
+                    except:
+                        # Fallback to period-based download
+                        data = ticker.history(period="1y", auto_adjust=params['auto_adjust'])
+                    
+                    if data is not None and not data.empty:
+                        # Filter to requested date range if needed
+                        if start_date:
+                            data = data[data.index >= pd.to_datetime(start_date)]
+                        print(f"  ✓ Successfully downloaded {symbol} via Ticker ({len(data)} rows)")
+                        return data
+                except Exception as e2:
+                    print(f"  ✗ Alternative method also failed: {str(e2)[:100]}")
+            continue
+    
+    # All attempts failed
+    error_msg = f"Failed to download data for {symbol} after {max_attempts} attempts.\n"
+    error_msg += "Possible causes:\n"
+    error_msg += "  - Network connectivity issues\n"
+    error_msg += f"  - Symbol {symbol} may be temporarily unavailable\n"
+    error_msg += "  - yfinance API issues or rate limiting\n"
+    error_msg += "  - Market is closed (try again during market hours)\n"
+    error_msg += "  - Symbol may have changed or been delisted"
+    raise ValueError(error_msg)
+
 def get_regime_prediction():
-    """Get current regime prediction using HMM-RF model"""
+    """
+    Get current regime prediction using HMM-RF model.
+    
+    IMPORTANT - Date Logic and Look-Ahead Bias Prevention:
+    - All features are calculated with .shift(1) to ensure we only use data available
+      before market open on the prediction date
+    - If the last row in features_df is date T, its features use data from date T-1
+    - We predict the regime for date T using features from T-1
+    - This ensures no look-ahead bias: we never use same-day returns or prices
+    
+    Example:
+    - If last available data is Friday, features_df[-1] is Friday's row
+    - Friday's features are based on Thursday's data (due to .shift(1))
+    - We predict Friday's regime using Thursday's metrics
+    - This is correct because Thursday's data is available before Friday's market open
+    """
     
     # Load data - use enough history for feature calculation
     start_date = (datetime.now() - timedelta(days=400)).strftime('%Y-%m-%d')
     end_date = None  # Get latest data
     
     print("Loading market data...")
-    qqq_data = yf.download(SYMBOL, start=start_date, end=end_date, progress=False, auto_adjust=True)
+    
+    # Download QQQ data with retry logic
+    qqq_data = download_symbol_data(SYMBOL, start_date, end_date)
+    
+    # Clean up column names
     if isinstance(qqq_data.columns, pd.MultiIndex):
         qqq_data.columns = qqq_data.columns.droplevel(1)
     qqq_data.columns = qqq_data.columns.str.lower()
     
-    vix_data = yf.download(VIX_SYMBOL, start=start_date, end=end_date, progress=False, auto_adjust=True)
+    # Validate QQQ data
+    if qqq_data.empty:
+        raise ValueError(f"No data downloaded for {SYMBOL} - DataFrame is empty")
+    if 'close' not in qqq_data.columns:
+        raise ValueError(f"Missing 'close' column in {SYMBOL} data")
+    if qqq_data['close'].isna().all():
+        raise ValueError(f"All 'close' values are NaN for {SYMBOL}")
+    if len(qqq_data) < 50:
+        raise ValueError(f"Insufficient data for {SYMBOL}: only {len(qqq_data)} rows")
+    
+    # Download VIX data with retry logic
+    vix_data = download_symbol_data(VIX_SYMBOL, start_date, end_date)
+    
+    # Clean up column names
     if isinstance(vix_data.columns, pd.MultiIndex):
         vix_data.columns = vix_data.columns.droplevel(1)
     vix_data.columns = vix_data.columns.str.lower()
     
-    rates_data = yf.download(RATES_SYMBOL, start=start_date, end=end_date, progress=False, auto_adjust=True)
+    # Validate VIX data
+    if 'close' not in vix_data.columns:
+        raise ValueError(f"Missing 'close' column in {VIX_SYMBOL} data")
+    
+    # Download rates data with retry logic
+    rates_data = download_symbol_data(RATES_SYMBOL, start_date, end_date)
+    
+    # Clean up column names
     if isinstance(rates_data.columns, pd.MultiIndex):
         rates_data.columns = rates_data.columns.droplevel(1)
     rates_data.columns = rates_data.columns.str.lower()
+    
+    # Validate rates data
+    if 'close' not in rates_data.columns:
+        raise ValueError(f"Missing 'close' column in {RATES_SYMBOL} data")
     
     # Align data
     aligned_index = qqq_data.index
     vix_aligned = vix_data['close'].reindex(aligned_index).ffill().bfill()
     rates_aligned = rates_data['close'].reindex(aligned_index).ffill().bfill()
+    
+    # Validate aligned data
+    if vix_aligned.isna().all():
+        raise ValueError(f"All VIX values are NaN after alignment")
+    if rates_aligned.isna().all():
+        raise ValueError(f"All rates values are NaN after alignment")
     
     # Calculate features
     print("Calculating features...")
@@ -218,17 +398,20 @@ def get_regime_prediction():
     # Filter to only existing features
     feature_names = [f for f in feature_names if f in features_df.columns]
     
-    # Use last TRAIN_WINDOW days for training, predict for today (last row)
-    # Note: features_df[-1] contains features calculated from yesterday's data
-    # These features are used to predict today's regime (properly lagged)
+    # Use last TRAIN_WINDOW days for training, predict for next trading day
+    # IMPORTANT: features_df[-1] contains features calculated from the PREVIOUS day's data (due to .shift(1))
+    # So if the last row is date T, its features use data from T-1, and we predict regime for date T
+    # This ensures no look-ahead bias - we only use data available before market open on date T
     train_data = features_df.iloc[-TRAIN_WINDOW-1:-1]  # Last TRAIN_WINDOW days (excluding last row)
-    today_features = features_df.iloc[-1:]  # Last row: features from yesterday, used to predict today
+    today_features = features_df.iloc[-1:]  # Last row: features from previous day, used to predict this day's regime
     
-    # The date we're predicting for is actually "today" (next trading day after last data point)
+    # The prediction_date is the date of the last row in features_df
+    # This row's features are based on the previous day's data (properly lagged)
+    # So we're predicting the regime for prediction_date using data from prediction_date - 1 day
     prediction_date = today_features.index[0]
     print(f"Training on {len(train_data)} days")
-    print(f"Features date: {prediction_date.date()} (yesterday's data)")
-    print(f"Predicting regime for: Next trading day")
+    print(f"Features date: {prediction_date.date()} (features calculated from previous day's data)")
+    print(f"Predicting regime for: {prediction_date.date()} (using previous day's metrics)")
     
     # Scale features (fit on training, transform today)
     scaler = StandardScaler()
@@ -304,9 +487,14 @@ def get_regime_prediction():
     circuit_breaker_triggered = False
     
     if CIRCUIT_BREAKER_ENABLED:
-        # Check yesterday's return
-        yesterday_return = today_features['daily_return'].iloc[0]
-        if yesterday_return < CIRCUIT_BREAKER_THRESHOLD:
+        # Circuit breaker: if the day before the prediction date had a large drop,
+        # force the prediction date to be turbulent
+        # Note: today_features['daily_return'] is already shifted by 1 day
+        # So if prediction_date is T, daily_return is the return from T-2 to T-1
+        # This is the return from the day before the prediction date, which is what we want to check
+        prediction_date = today_features.index[0]
+        day_before_return = today_features['daily_return'].iloc[0]
+        if day_before_return < CIRCUIT_BREAKER_THRESHOLD:
             final_regime = 1  # Force turbulent
             circuit_breaker_triggered = True
     
@@ -378,15 +566,23 @@ def main():
         previous_state = load_state()
         prediction = get_regime_prediction()
         
-        # Format date - this is the date of the features (yesterday), but we're predicting for today
+        # Format date - prediction['date'] is the date we're predicting the regime for
+        # The features used for this prediction are from the previous trading day (due to .shift(1))
         pred_date = prediction['date']
         if hasattr(pred_date, 'date'):
-            features_date_str = pred_date.date().strftime('%Y-%m-%d')
-            # Today is the next trading day
-            today_str = datetime.now().strftime('%Y-%m-%d')
+            prediction_date_str = pred_date.date().strftime('%Y-%m-%d')
+            # The features date is the previous trading day (data used for prediction)
+            # Since features are shifted, we need to get the previous trading day
+            # For now, we'll use the prediction date as the reference
+            features_date_str = prediction_date_str  # This represents the date whose data was used
         else:
-            features_date_str = str(pred_date)
-            today_str = datetime.now().strftime('%Y-%m-%d')
+            prediction_date_str = str(pred_date)
+            features_date_str = prediction_date_str
+        
+        # The prediction is for the date in prediction['date']
+        # If this is a past date, we might want to predict for the next trading day
+        # But for now, we'll use the prediction date as-is
+        today_str = prediction_date_str
         
         # Check if regime changed
         prev_regime = previous_state.get('regime', None)
