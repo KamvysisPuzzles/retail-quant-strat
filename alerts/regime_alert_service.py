@@ -650,10 +650,9 @@ def main():
         message += f"📅 Prediction Date: {today_str}\n"
         message += f"📊 Features Date: {features_date_str}\n"
         message += f"🎯 Regime: {prediction['regime']}\n"
-        message += f"💼 Recommended Holding: {prediction['holding']}\n"
-        message += f"📈 Confidence: {prediction['confidence']:.1%}\n\n"
+        message += f"💼 Recommended Holding: {prediction['holding']}\n\n"
         
-        message += f"Market Data:\n"
+        message += f"Market Data (as of close of previous day):\n"
         message += f"  {SYMBOL} Price: ${prediction['qqq_price']:.2f}\n"
         if prediction['tqqq_price']:
             message += f"  {LEVERAGED_SYMBOL} Price: ${prediction['tqqq_price']:.2f}\n"
