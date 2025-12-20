@@ -313,7 +313,13 @@ def get_regime_prediction():
     """
     
     # Load data - use enough history for feature calculation
-    start_date = (datetime.now() - timedelta(days=400)).strftime('%Y-%m-%d')
+    # IMPORTANT: We need extra days because:
+    # - Rolling windows create NaN at start (rv_20 needs 20 days, vix_percentile needs 252 days)
+    # - .shift(1) operations create NaN in first row
+    # - Market holidays reduce trading days (500 calendar days ≈ 350-360 trading days)
+    # - After dropna(), we need at least 253 valid rows for training
+    # So we request 500 calendar days to ensure we have enough trading days after feature calculation
+    start_date = (datetime.now() - timedelta(days=500)).strftime('%Y-%m-%d')
     end_date = None  # Get latest data
     
     print("Loading market data...")
@@ -373,11 +379,45 @@ def get_regime_prediction():
     
     # Calculate features
     print("Calculating features...")
+    print(f"  Raw QQQ data: {len(qqq_data)} rows")
     features_df = calculate_features(qqq_data, vix_aligned, rates_aligned)
-    features_df = features_df.dropna()
+    print(f"  Features before dropna: {len(features_df)} rows")
     
-    if len(features_df) < TRAIN_WINDOW + 1:
-        raise ValueError(f"Not enough data. Need at least {TRAIN_WINDOW + 1} days, got {len(features_df)}")
+    # Check which features have NaN values
+    nan_counts = features_df.isna().sum()
+    if nan_counts.sum() > 0:
+        print(f"  NaN counts by feature:")
+        for col, count in nan_counts[nan_counts > 0].items():
+            print(f"    {col}: {count} NaN values")
+    
+    # Drop rows with NaN values
+    features_df = features_df.dropna()
+    print(f"  Features after dropna: {len(features_df)} rows")
+    
+    # Validate we have enough data
+    # We need at least TRAIN_WINDOW days for training, ideally TRAIN_WINDOW + 1 for prediction
+    if len(features_df) < TRAIN_WINDOW:
+        error_msg = f"Not enough data after feature calculation. Need at least {TRAIN_WINDOW} days, got {len(features_df)}.\n"
+        error_msg += f"  Raw QQQ data: {len(qqq_data)} rows\n"
+        error_msg += f"  Features before dropna: {features_before_dropna} rows\n"
+        error_msg += f"  Features after dropna: {len(features_df)} rows\n"
+        error_msg += f"  Rows lost to NaN: {features_before_dropna - len(features_df)}\n"
+        error_msg += f"  Date range: {qqq_data.index[0].date()} to {qqq_data.index[-1].date()}\n"
+        error_msg += "\nWhy data is lost:\n"
+        error_msg += "  - Rolling window features create NaN values:\n"
+        error_msg += "    * rv_20 needs 20 days + 1 shift = ~21 rows lost\n"
+        error_msg += "    * mom_21 needs 21 days + 1 shift = ~22 rows lost\n"
+        error_msg += "    * vix_percentile needs 252 days = ~252 rows lost\n"
+        error_msg += "  - .shift(1) operations create NaN in first row\n"
+        error_msg += "  - Market holidays reduce trading days (400 calendar days ≈ 280-290 trading days)\n"
+        error_msg += "\nSolution: Download more historical data by increasing the start_date range"
+        raise ValueError(error_msg)
+    
+    # Adjust training window if we have exactly TRAIN_WINDOW days
+    # In this case, we'll train on TRAIN_WINDOW - 1 days and predict on the last day
+    actual_train_window = min(TRAIN_WINDOW, len(features_df) - 1)
+    if actual_train_window < TRAIN_WINDOW:
+        print(f"  ⚠ Warning: Only {len(features_df)} days available. Training on {actual_train_window} days instead of {TRAIN_WINDOW}")
     
     # Define feature sets
     base_features = ['rt', 'rv_20', 'mom_21', 'rv_5', 'vix', 'rates']
@@ -398,18 +438,26 @@ def get_regime_prediction():
     # Filter to only existing features
     feature_names = [f for f in feature_names if f in features_df.columns]
     
-    # Use last TRAIN_WINDOW days for training, predict for next trading day
+    # Use last actual_train_window days for training, predict for next trading day
     # IMPORTANT: features_df[-1] contains features calculated from the PREVIOUS day's data (due to .shift(1))
     # So if the last row is date T, its features use data from T-1, and we predict regime for date T
     # This ensures no look-ahead bias - we only use data available before market open on date T
-    train_data = features_df.iloc[-TRAIN_WINDOW-1:-1]  # Last TRAIN_WINDOW days (excluding last row)
+    
+    # Adjust slicing based on available data
+    if len(features_df) >= TRAIN_WINDOW + 1:
+        # Ideal case: we have enough data for full training window
+        train_data = features_df.iloc[-TRAIN_WINDOW-1:-1]  # Last TRAIN_WINDOW days (excluding last row)
+    else:
+        # Fallback: use all data except the last row for training
+        train_data = features_df.iloc[:-1]  # All rows except last
+    
     today_features = features_df.iloc[-1:]  # Last row: features from previous day, used to predict this day's regime
     
     # The prediction_date is the date of the last row in features_df
     # This row's features are based on the previous day's data (properly lagged)
     # So we're predicting the regime for prediction_date using data from prediction_date - 1 day
     prediction_date = today_features.index[0]
-    print(f"Training on {len(train_data)} days")
+    print(f"Training on {len(train_data)} days (requested: {TRAIN_WINDOW}, available: {len(features_df)})")
     print(f"Features date: {prediction_date.date()} (features calculated from previous day's data)")
     print(f"Predicting regime for: {prediction_date.date()} (using previous day's metrics)")
     
